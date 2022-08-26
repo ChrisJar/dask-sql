@@ -13,8 +13,10 @@ pub mod explain;
 pub mod filter;
 pub mod join;
 pub mod limit;
+pub mod predict_model;
 pub mod projection;
 pub mod repartition_by;
+pub mod show_columns;
 pub mod show_schema;
 pub mod show_tables;
 pub mod sort;
@@ -30,6 +32,8 @@ use pyo3::prelude::*;
 use self::create_model::CreateModelPlanNode;
 use self::create_table::CreateTablePlanNode;
 use self::drop_model::DropModelPlanNode;
+use self::predict_model::PredictModelPlanNode;
+use self::show_columns::ShowColumnsPlanNode;
 use self::show_schema::ShowSchemasPlanNode;
 use self::show_tables::ShowTablesPlanNode;
 
@@ -159,6 +163,15 @@ impl PyLogicalPlan {
         to_py_plan(self.current_node.as_ref())
     }
 
+    /// LogicalPlan::Extension::PredictModel as PyPredictModel
+    pub fn predict_model(&self) -> PyResult<predict_model::PyPredictModel> {
+        to_py_plan(self.current_node.as_ref())
+    }
+    /// LogicalPlan::Extension::ShowColumns as PyShowColumns
+    pub fn show_columns(&self) -> PyResult<show_columns::PyShowColumns> {
+        to_py_plan(self.current_node.as_ref())
+    }
+
     /// Gets the "input" for the current LogicalPlan
     pub fn get_inputs(&mut self) -> PyResult<Vec<PyLogicalPlan>> {
         let mut py_inputs: Vec<PyLogicalPlan> = Vec::new();
@@ -239,10 +252,14 @@ impl PyLogicalPlan {
                     "CreateTable"
                 } else if node.downcast_ref::<DropModelPlanNode>().is_some() {
                     "DropModel"
+                } else if node.downcast_ref::<PredictModelPlanNode>().is_some() {
+                    "PredictModel"
                 } else if node.downcast_ref::<ShowSchemasPlanNode>().is_some() {
                     "ShowSchemas"
                 } else if node.downcast_ref::<ShowTablesPlanNode>().is_some() {
                     "ShowTables"
+                } else if node.downcast_ref::<ShowColumnsPlanNode>().is_some() {
+                    "ShowColumns"
                 } else {
                     // Default to generic `Extension`
                     "Extension"

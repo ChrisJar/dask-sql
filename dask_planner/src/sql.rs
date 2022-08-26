@@ -4,6 +4,7 @@ pub mod function;
 pub mod logical;
 pub mod optimizer;
 pub mod parser_utils;
+pub mod rules;
 pub mod schema;
 pub mod statement;
 pub mod table;
@@ -16,7 +17,7 @@ use datafusion_common::{DFSchema, DataFusionError};
 use datafusion_expr::logical_plan::Extension;
 use datafusion_expr::{
     AggregateUDF, LogicalPlan, PlanVisitor, ReturnTypeFunction, ScalarFunctionImplementation,
-    ScalarUDF, Signature, TableSource, Volatility,
+    ScalarUDF, Signature, TableSource, TypeSignature, Volatility,
 };
 use datafusion_sql::{
     parser::Statement as DFStatement,
@@ -32,12 +33,13 @@ use crate::parser::{DaskParser, DaskStatement};
 use crate::sql::logical::create_model::CreateModelPlanNode;
 use crate::sql::logical::create_table::CreateTablePlanNode;
 use crate::sql::logical::drop_model::DropModelPlanNode;
+use crate::sql::logical::predict_model::PredictModelPlanNode;
+use crate::sql::logical::show_columns::ShowColumnsPlanNode;
 use crate::sql::logical::show_schema::ShowSchemasPlanNode;
+use crate::sql::logical::show_tables::ShowTablesPlanNode;
 
 use crate::sql::logical::PyLogicalPlan;
 use pyo3::prelude::*;
-
-use self::logical::show_tables::ShowTablesPlanNode;
 
 /// DaskSQLContext is main interface used for interacting with DataFusion to
 /// parse SQL queries, build logical plans, and optimize logical plans.
@@ -152,9 +154,28 @@ impl ContextProvider for DaskSQLContext {
         for schema in self.schemas.values() {
             for (fun_name, function) in &schema.functions {
                 if fun_name.eq(name) {
-                    let sig = Signature::variadic(vec![DataType::Int64], Volatility::Immutable);
-                    let d_type: DataType = function.return_type.clone().into();
-                    let rtf: ReturnTypeFunction = Arc::new(move |_| Ok(Arc::new(d_type.clone())));
+                    let sig = {
+                        let function = function.lock().unwrap();
+                        Signature::one_of(
+                            function
+                                .return_types
+                                .keys()
+                                .map(|v| TypeSignature::Exact(v.to_vec()))
+                                .collect(),
+                            Volatility::Immutable,
+                        )
+                    };
+                    let function = function.clone();
+                    let rtf: ReturnTypeFunction = Arc::new(move |input_types| {
+                        let function = function.lock().unwrap();
+                        match function.return_types.get(&input_types.to_vec()) {
+                            Some(return_type) => Ok(Arc::new(return_type.clone())),
+                            None => Err(DataFusionError::Plan(format!(
+                                "UDF signature not found for input types {:?}",
+                                input_types
+                            ))),
+                        }
+                    });
                     return Some(Arc::new(ScalarUDF::new(
                         fun_name.as_str(),
                         &sig,
@@ -196,24 +217,6 @@ impl DaskSQLContext {
     ) -> PyResult<bool> {
         self.schemas.insert(schema_name, schema);
         Ok(true)
-    }
-
-    /// Register a function with the current DaskSQLContext under the specified schema
-    pub fn register_function(
-        &mut self,
-        schema_name: String,
-        function: function::DaskFunction,
-    ) -> PyResult<bool> {
-        match self.schemas.get_mut(&schema_name) {
-            Some(schema) => {
-                schema.add_function(function);
-                Ok(true)
-            }
-            None => Err(py_runtime_err(format!(
-                "Schema: {} not found in DaskSQLContext",
-                schema_name
-            ))),
-        }
     }
 
     /// Register a DaskTable instance under the specified schema in the current DaskSQLContext
@@ -315,6 +318,15 @@ impl DaskSQLContext {
                     with_options: create_model.with_options,
                 }),
             })),
+            DaskStatement::PredictModel(predict_model) => Ok(LogicalPlan::Extension(Extension {
+                node: Arc::new(PredictModelPlanNode {
+                    model_schema: predict_model.schema_name,
+                    model_name: predict_model.name,
+                    input: self._logical_relational_algebra(DaskStatement::Statement(Box::new(
+                        predict_model.select,
+                    )))?,
+                }),
+            })),
             DaskStatement::CreateTable(create_table) => Ok(LogicalPlan::Extension(Extension {
                 node: Arc::new(CreateTablePlanNode {
                     schema: Arc::new(DFSchema::empty()),
@@ -342,6 +354,13 @@ impl DaskSQLContext {
                 node: Arc::new(ShowTablesPlanNode {
                     schema: Arc::new(DFSchema::empty()),
                     schema_name: show_tables.schema_name,
+                }),
+            })),
+            DaskStatement::ShowColumns(show_columns) => Ok(LogicalPlan::Extension(Extension {
+                node: Arc::new(ShowColumnsPlanNode {
+                    schema: Arc::new(DFSchema::empty()),
+                    table_name: show_columns.table_name,
+                    schema_name: show_columns.schema_name,
                 }),
             })),
         }
